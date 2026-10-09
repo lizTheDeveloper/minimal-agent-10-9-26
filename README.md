@@ -40,7 +40,7 @@ $env:OPENROUTER_API_KEY = "sk-or-..."
 uv run agent.py
 ```
 
-uv installs the `openai` package the first time you run it, so you don't need `pip install` or a virtual environment.
+uv installs the packages the agent needs the first time you run it, so you don't need `pip install` or a virtual environment.
 
 You'll see a `you>` prompt. Try these:
 
@@ -53,6 +53,20 @@ you> what time is it?
 To quit, press Enter on an empty line or type `quit`.
 
 Asking for the time makes the model call the `get_time` tool. If you ask what your name is, it remembers, but only until you quit. Restart the agent and ask again: it has forgotten. You'll fix that today.
+
+### Search tools
+
+The agent can search arXiv (`search_arxiv`) and the web through [agentsweb.org](https://agentsweb.org/docs) (`search_agentsweb`) with no setup. Tavily search (`search_tavily`) needs a free key from [tavily.com](https://tavily.com):
+
+```bash
+export TAVILY_API_KEY=tvly-...            # macOS / Linux
+```
+
+```powershell
+$env:TAVILY_API_KEY = "tvly-..."          # Windows (PowerShell)
+```
+
+Without the key the agent still runs; the Tavily tool just tells the model it isn't set up.
 
 ### Using a different model
 
@@ -70,7 +84,8 @@ The model has to support tool calling. If you get errors about tools, try a diff
 |---|---|
 | `agent.py` | The main loop. It reads your input, calls the model, runs any tools the model asks for, and prints the answer. |
 | `prompt.py` | Builds the list of messages the model sees: the system prompt, the conversation so far, and your new message. |
-| `tools.py` | The tools the model can call (`get_time` and `search_memory`), plus the descriptions the model reads to decide when to use them. |
+| `tools.py` | The tools the model can call (`get_time`, memory tools, and web search: `search_arxiv`, `search_tavily`, `search_agentsweb`), plus the descriptions the model reads to decide when to use them. |
+| `database.py` | Storage. Saves memories and the conversation to `memory.db` (SQLite), turns text into embeddings, and searches them with FAISS. |
 
 One turn of the conversation goes like this:
 
@@ -81,6 +96,40 @@ One turn of the conversation goes like this:
 5. Your message and the answer are added to `history`.
 
 `history` is the agent's **short-term memory**. It's a Python list that lasts only while the program runs.
+
+## Embeddings: Mac vs. Windows and Linux
+
+`search_memory` finds memories by meaning, not exact words. To do that it turns text into an **embedding**, a list of numbers, using a Qwen3-Embedding model. There are two ways to run that model, and the agent picks one for you:
+
+| Your computer | What runs | Cost |
+|---|---|---|
+| Mac with Apple Silicon (M1 or later) | `Qwen3-Embedding-0.6B` locally, through Apple's MLX library | Free. The model (about 350 MB) downloads the first time you run the agent. |
+| Windows, Linux, or an Intel Mac | `qwen/qwen3-embedding-8b` through OpenRouter, using the same key as the chat model | A tiny amount of OpenRouter credit per memory saved or searched. |
+
+### Windows students
+
+You don't need to do anything special. Follow the setup above in PowerShell:
+
+```powershell
+$env:OPENROUTER_API_KEY = "sk-or-..."
+uv run agent.py
+```
+
+uv skips the Mac-only package, and the agent uses OpenRouter for embeddings automatically. Make sure your OpenRouter account has a little credit, because the embedding model isn't free.
+
+### Choosing a backend yourself
+
+Set `EMBED_BACKEND` to `mlx` or `openrouter`, and `EMBED_MODEL` to pick a different model:
+
+```bash
+EMBED_BACKEND=openrouter uv run agent.py                                     # macOS / Linux
+```
+
+```powershell
+$env:EMBED_BACKEND = "openrouter"; uv run agent.py                         # Windows
+```
+
+Different models make embeddings of different sizes (the 0.6B makes 1024 numbers, the 8B makes 4096), so they can't share a `memory.db`. If you switch, delete `memory.db` and start fresh.
 
 ## Your task: add long-term memory
 
@@ -114,4 +163,6 @@ Recall (hooks 1, 2 and 3) only works once there's something saved, so do hook 4 
 - **`401` or "authentication" errors**: the key is wrong or has been revoked. Make a new one at [openrouter.ai/keys](https://openrouter.ai/keys).
 - **`402` or "insufficient credits"**: your OpenRouter account needs credits, or you can switch to a free model (its ID ends in `:free`).
 - **Model not found**: check the model ID on [openrouter.ai/models](https://openrouter.ai/models) and set it with `MODEL=...`.
+- **"memory.db was built with a different embedding model"**: you switched `EMBED_BACKEND` or `EMBED_MODEL`. Delete `memory.db`, or switch back.
+- **`No module named 'mlx'`** after setting `EMBED_BACKEND=mlx`: MLX only runs on Apple Silicon Macs. Remove the setting to use OpenRouter instead.
 - **`ModuleNotFoundError: No module named 'prompt'`**: run the agent from inside the project folder, so that `agent.py`, `prompt.py` and `tools.py` sit next to each other.

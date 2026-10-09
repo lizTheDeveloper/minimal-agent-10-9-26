@@ -4,13 +4,24 @@ import os
 import sqlite3
 
 import faiss  # vector index: finds the stored embeddings closest to a query embedding
-import mlx.core as mx
 import numpy as np
-from mlx_lm import load
 
-# Qwen3-Embedding runs locally on Apple Silicon via MLX. Swap in a bigger one with EMBED_MODEL, e.g. the 8B.
-EMBED_MODEL = os.getenv("EMBED_MODEL", "mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ")
-embed_model, embed_tokenizer = load(EMBED_MODEL)
+try:  # MLX only exists on Apple Silicon Macs
+    import mlx.core as mx
+    from mlx_lm import load
+    HAS_MLX = True
+except ImportError:
+    HAS_MLX = False
+
+# "mlx" runs Qwen3-Embedding locally on Apple Silicon. "openrouter" calls Qwen3-Embedding over the API (any OS).
+EMBED_BACKEND = os.getenv("EMBED_BACKEND", "mlx" if HAS_MLX else "openrouter")
+if EMBED_BACKEND == "mlx":
+    EMBED_MODEL = os.getenv("EMBED_MODEL", "mlx-community/Qwen3-Embedding-0.6B-4bit-DWQ")
+    embed_model, embed_tokenizer = load(EMBED_MODEL)
+else:
+    from openai import OpenAI
+    EMBED_MODEL = os.getenv("EMBED_MODEL", "qwen/qwen3-embedding-8b")
+    embed_client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=os.environ["OPENROUTER_API_KEY"])
 
 memory_database = sqlite3.connect("memory.db")  # SQLite holds the text AND its embedding; FAISS is rebuilt from it
 memory_cursor = memory_database.cursor()
@@ -25,9 +36,13 @@ def embed(text, is_query=False):
     """Turn text into a unit-length vector. Qwen3-Embedding wants an instruction on queries, not on documents."""
     if is_query:
         text = f"Instruct: Given a question, retrieve memories that help answer it\nQuery:{text}"
-    token_ids = embed_tokenizer.encode(text)  # the tokenizer appends <|endoftext|>, the token we pool on
-    hidden = embed_model.model(mx.array([token_ids]))  # run the transformer, skip the next-token head
-    vector = np.array(hidden[0, -1].astype(mx.float32))  # last-token pooling: the final token's hidden state
+    if EMBED_BACKEND == "mlx":
+        token_ids = embed_tokenizer.encode(text)  # the tokenizer appends <|endoftext|>, the token we pool on
+        hidden = embed_model.model(mx.array([token_ids]))  # run the transformer, skip the next-token head
+        vector = np.array(hidden[0, -1].astype(mx.float32))  # last-token pooling: the final token's hidden state
+    else:
+        response = embed_client.embeddings.create(model=EMBED_MODEL, input=text)
+        vector = np.array(response.data[0].embedding, dtype=np.float32)
     return vector / np.linalg.norm(vector)  # normalize so inner product == cosine similarity
 
 
@@ -37,10 +52,13 @@ def build_index():
         memory_cursor.execute("UPDATE memories SET embedding = ? WHERE rowid = ?", (embed(content).tobytes(), rowid))
     memory_database.commit()
     rows = memory_cursor.execute("SELECT rowid, embedding FROM memories").fetchall()
-    dimension = embed_model.args.hidden_size  # 1024 for 0.6B, 4096 for 8B
+    dimension = len(embed("dimension check"))  # 1024 for 0.6B, 4096 for 8B
     index = faiss.IndexIDMap(faiss.IndexFlatIP(dimension))  # exact inner-product search; IDs map back to rowids
     if rows:
         vectors = np.stack([np.frombuffer(blob, dtype=np.float32) for _, blob in rows])
+        if vectors.shape[1] != dimension:
+            raise SystemExit(f"memory.db was built with a different embedding model ({vectors.shape[1]} dims, "
+                             f"{EMBED_MODEL} makes {dimension}). Delete memory.db or switch EMBED_BACKEND back.")
         index.add_with_ids(vectors, np.array([rowid for rowid, _ in rows], dtype=np.int64))
     return index
 

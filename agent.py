@@ -1,5 +1,10 @@
 # /// script
-# dependencies = ["openai", "mlx-lm", "faiss-cpu", "numpy"]
+# dependencies = [
+#   "openai",
+#   "faiss-cpu",
+#   "numpy",
+#   "mlx-lm; sys_platform == 'darwin' and platform_machine == 'arm64'",  # local embeddings, Apple Silicon only
+# ]
 # ///
 """The world's most basic agent: read input, call the model, run any tools, repeat."""
 
