@@ -68,6 +68,8 @@ $env:TAVILY_API_KEY = "tvly-..."          # Windows (PowerShell)
 
 Without the key the agent still runs; the Tavily tool just tells the model it isn't set up.
 
+Every result these tools fetch is cleaned up, embedded and saved in the `documents` table of `memory.db`. The `search_documents` tool searches that cache by meaning, without going back to the web. Documents have their own search index, separate from memories, so web pages don't crowd out things the agent was told to remember.
+
 ### Using a different model
 
 The default model is `anthropic/claude-sonnet-5.5`. To try another one, pick any model ID from [openrouter.ai/models](https://openrouter.ai/models) and set `MODEL`:

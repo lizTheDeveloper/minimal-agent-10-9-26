@@ -3,6 +3,7 @@
 #   "openai",
 #   "faiss-cpu",
 #   "numpy",
+#   "prompt_toolkit",
 #   "mlx-lm; sys_platform == 'darwin' and platform_machine == 'arm64'",  # local embeddings, Apple Silicon only
 # ]
 # ///
@@ -11,6 +12,7 @@
 import os
 
 from openai import OpenAI
+from prompt_toolkit import PromptSession
 
 from prompt import build_messages
 from database import save_conversation_history
@@ -38,8 +40,9 @@ def respond(history, user_input):
 def main():
     """Chat loop in the terminal."""
     history = []  # short-term memory: just the transcript
+    session = PromptSession()  # unlike input(), a multi-line paste arrives as one message
     while True:
-        user_input = input("you> ")
+        user_input = session.prompt("you> ")
         if user_input in ("", "quit", "exit"):
             ## create a conversation summary before exiting
             summary = respond(history, "Summarize the conversation so far, frame it as a memory as it will be stored to the memory index.")

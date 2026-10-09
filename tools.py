@@ -5,7 +5,7 @@ import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 
-from database import find_in_conversation_history, find_memories, store_memory
+from database import find_documents, find_in_conversation_history, find_memories, store_document, store_memory
 
 
 def get_time():
@@ -41,18 +41,25 @@ def http_get(url, data=None, headers=None):
         return response.read().decode("utf-8")
 
 
+def cache_and_format(results, source, query, empty_message="No results."):
+    """Save each result to the document cache, then format them for the model. Results are dicts with title, url, content."""
+    for result in results:
+        store_document(result["url"], result["title"], result["content"], source, query)
+    return "\n\n".join(f"{r['title']}\n{r['url']}\n{r['content'][:500]}" for r in results) or empty_message
+
+
 def search_arxiv(query, max_results=5):
     """Search arXiv papers. Free, no key. The API returns Atom XML."""
     search = " AND ".join(f"all:{word}" for word in query.split())  # every word must match
     params = urllib.parse.urlencode({"search_query": search, "max_results": max_results, "sortBy": "relevance"})
     feed = ET.fromstring(http_get(f"https://export.arxiv.org/api/query?{params}"))
     atom = {"a": "http://www.w3.org/2005/Atom"}
-    papers = []
-    for entry in feed.findall("a:entry", atom):
-        title = " ".join(entry.find("a:title", atom).text.split())  # titles come with line breaks
-        summary = " ".join(entry.find("a:summary", atom).text.split())[:500]
-        papers.append(f"{title}\n{entry.find('a:id', atom).text}\n{summary}")
-    return "\n\n".join(papers) or "No papers found."
+    papers = [{
+        "title": " ".join(entry.find("a:title", atom).text.split()),  # titles come with line breaks
+        "url": entry.find("a:id", atom).text,
+        "content": " ".join(entry.find("a:summary", atom).text.split()),
+    } for entry in feed.findall("a:entry", atom)]
+    return cache_and_format(papers, "arxiv", query, "No papers found.")
 
 
 def search_tavily(query, max_results=5):
@@ -62,14 +69,24 @@ def search_tavily(query, max_results=5):
     body = json.dumps({"query": query, "max_results": max_results}).encode()
     headers = {"Authorization": f"Bearer {os.environ['TAVILY_API_KEY']}", "Content-Type": "application/json"}
     results = json.loads(http_get("https://api.tavily.com/search", data=body, headers=headers))["results"]
-    return "\n\n".join(f"{r['title']}\n{r['url']}\n{r['content'][:500]}" for r in results) or "No results."
+    return cache_and_format(results, "tavily", query)  # Tavily already uses title, url, content
 
 
 def search_agentsweb(query, count=5):
     """Search the web with agentsweb.org. Free, no key; snippets come back as markdown."""
     params = urllib.parse.urlencode({"q": query, "count": count})
     results = json.loads(http_get(f"https://agentsweb.org/web?{params}"))["results"]
-    return "\n\n".join(f"{r['title']}\n{r['url']}\n{r['snippet'][:500]}" for r in results) or "No results."
+    pages = [{"title": r["title"], "url": r["url"], "content": r["snippet"]} for r in results]
+    return cache_and_format(pages, "agentsweb", query)
+
+
+def search_documents(query, k=5):
+    """Search everything the search tools have fetched before, by meaning. No network needed."""
+    results = find_documents(query, k)
+    if not results:
+        return "No cached documents yet."
+    return "\n\n".join(f"{title}\n{url} (from {source}, fetched {fetched_at}, similarity {score:.2f})\n{content[:500]}"
+                       for title, url, content, source, fetched_at, score in results)
 
 
 TOOLS = {  # name -> python function
@@ -80,6 +97,7 @@ TOOLS = {  # name -> python function
     "search_arxiv": search_arxiv,
     "search_tavily": search_tavily,
     "search_agentsweb": search_agentsweb,
+    "search_documents": search_documents,
 }
 
 SCHEMAS = [  # what the model is told about each tool (OpenAI-style function schemas)
@@ -116,6 +134,11 @@ SCHEMAS = [  # what the model is told about each tool (OpenAI-style function sch
     {"type": "function", "function": {
         "name": "search_agentsweb",
         "description": "Search the web with agentsweb.org. Returns titles, links and markdown snippets.",
+        "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
+    }},
+    {"type": "function", "function": {
+        "name": "search_documents",
+        "description": "Search papers and web pages fetched by earlier searches, by meaning. Try this before searching the web again.",
         "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
     }},
 ]
