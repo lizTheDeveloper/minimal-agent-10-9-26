@@ -70,6 +70,10 @@ Without the key the agent still runs; the Tavily tool just tells the model it is
 
 Every result these tools fetch is cleaned up, embedded and saved in the `documents` table of `memory.db`. The `search_documents` tool searches that cache by meaning, without going back to the web. Documents have their own search index, separate from memories, so web pages don't crowd out things the agent was told to remember.
 
+The `news_threads` tool groups recently cached documents into stories, like [memeorandum](https://www.memeorandum.com/): a lead article plus the other coverage of the same story, matched by embedding similarity so different headlines still land together.
+
+Everything fetched from the web is wrapped in `<untrusted_document>` tags, and the system prompt tells the model to treat it as data to evaluate critically, never as instructions.
+
 ### Using a different model
 
 The default model is `anthropic/claude-sonnet-5.5`. To try another one, pick any model ID from [openrouter.ai/models](https://openrouter.ai/models) and set `MODEL`:

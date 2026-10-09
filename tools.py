@@ -5,7 +5,7 @@ import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 
-from database import find_documents, find_in_conversation_history, find_memories, store_document, store_memory
+from database import find_documents, find_in_conversation_history, find_memories, find_threads, store_document, store_memory
 
 
 def get_time():
@@ -41,11 +41,17 @@ def http_get(url, data=None, headers=None):
         return response.read().decode("utf-8")
 
 
+def untrusted(text):
+    """Wrap fetched text in a tag the system prompt tells the model to treat as data, never as instructions."""
+    text = text.replace("</untrusted_document", "&lt;/untrusted_document")  # so a page can't close the tag early
+    return f"<untrusted_document>\n{text}\n</untrusted_document>"
+
+
 def cache_and_format(results, source, query, empty_message="No results."):
     """Save each result to the document cache, then format them for the model. Results are dicts with title, url, content."""
     for result in results:
         store_document(result["url"], result["title"], result["content"], source, query)
-    return "\n\n".join(f"{r['title']}\n{r['url']}\n{r['content'][:500]}" for r in results) or empty_message
+    return "\n\n".join(untrusted(f"{r['title']}\n{r['url']} (from {source})\n{r['content'][:500]}") for r in results) or empty_message
 
 
 def search_arxiv(query, max_results=5):
@@ -85,8 +91,24 @@ def search_documents(query, k=5):
     results = find_documents(query, k)
     if not results:
         return "No cached documents yet."
-    return "\n\n".join(f"{title}\n{url} (from {source}, fetched {fetched_at}, similarity {score:.2f})\n{content[:500]}"
+    return "\n\n".join(untrusted(f"{title}\n{url} (from {source}, fetched {fetched_at}, similarity {score:.2f})\n{content[:500]}")
                        for title, url, content, source, fetched_at, score in results)
+
+
+def news_threads(days=7):
+    """Group recently fetched documents into stories, like memeorandum: a lead article plus related coverage."""
+    threads = find_threads(days)
+    stories = [thread for thread in threads if len(thread) > 1]
+    if not stories:
+        return "No stories with more than one source yet. Run some searches first."
+    blocks = []
+    for number, (lead, *related) in enumerate(stories, 1):
+        title, url, content, source, fetched_at = lead
+        lines = [f"Story {number} ({len(related) + 1} sources)", f"LEAD: {title}\n{url} (from {source})\n{content[:300]}"]
+        lines += [f"- {r_title}\n  {r_url} (from {r_source})" for r_title, r_url, _, r_source, _ in related]
+        blocks.append(untrusted("\n".join(lines)))
+    singles = len(threads) - len(stories)
+    return "\n\n".join(blocks) + f"\n\n({singles} other documents had no matching coverage.)"
 
 
 TOOLS = {  # name -> python function
@@ -98,6 +120,7 @@ TOOLS = {  # name -> python function
     "search_tavily": search_tavily,
     "search_agentsweb": search_agentsweb,
     "search_documents": search_documents,
+    "news_threads": news_threads,
 }
 
 SCHEMAS = [  # what the model is told about each tool (OpenAI-style function schemas)
@@ -141,11 +164,20 @@ SCHEMAS = [  # what the model is told about each tool (OpenAI-style function sch
         "description": "Search papers and web pages fetched by earlier searches, by meaning. Try this before searching the web again.",
         "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
     }},
+    {"type": "function", "function": {
+        "name": "news_threads",
+        "description": "Group documents fetched in the last few days into stories, even when their titles differ. "
+                       "Each story has a lead article and the other coverage of the same story.",
+        "parameters": {"type": "object", "properties": {"days": {"type": "integer", "description": "How far back to look (default 7)."}}},
+    }},
 ]
 
 
 def run_tool_call(call):
     """Run one tool call from the model and return the message that carries its result back."""
     args = json.loads(call.function.arguments or "{}")  # the model sends arguments as a JSON string
-    result = TOOLS[call.function.name](**args)  # look up the function by name and call it
+    try:
+        result = TOOLS[call.function.name](**args)  # look up the function by name and call it
+    except Exception as error:  # a flaky search API shouldn't crash the agent; tell the model instead
+        result = f"Tool error: {error}"
     return {"role": "tool", "tool_call_id": call.id, "content": str(result)}  # id ties result to the call

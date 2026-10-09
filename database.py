@@ -1,4 +1,5 @@
 """Everything that touches storage: the SQLite file, embeddings, and the FAISS index built from them."""
+import html
 import json
 import os
 import re
@@ -107,6 +108,7 @@ def clean_markdown(text):
 def store_document(url, title, content, source, query):
     """Save a fetched search result and embed it. Re-fetching a URL updates it; unchanged content is skipped."""
     content = clean_markdown(content)
+    title = html.unescape(title)  # titles often arrive as "SpaceX&#x27;s"
     existing = memory_cursor.execute("SELECT rowid, content FROM documents WHERE url = ?", (url,)).fetchone()
     if existing and existing[1] == content:
         return
@@ -134,6 +136,30 @@ def find_documents(query, k=5):
         row = memory_cursor.execute("SELECT title, url, content, source, fetched_at FROM documents WHERE rowid = ?", (int(rowid),)).fetchone()
         results.append((*row, float(score)))
     return results
+
+
+def find_threads(days=7, threshold=0.55):
+    """Group recently fetched documents into news threads, memeorandum-style: each thread is a lead document plus
+    the documents that cover the same story, even when their titles differ.
+
+    The lead is the document most similar to the most others. Its close matches (cosine >= threshold) join its thread,
+    then the next lead is picked from what's left. Linking every match to the lead, not to each other, keeps one
+    thread from drifting into a chain of loosely related stories."""
+    rows = memory_cursor.execute("SELECT title, url, content, source, fetched_at, embedding FROM documents "
+                                 "WHERE fetched_at >= datetime('now', ?)", (f"-{days} days",)).fetchall()
+    if not rows:
+        return []
+    vectors = np.stack([np.frombuffer(row[5], dtype=np.float32) for row in rows])
+    similar = (vectors @ vectors.T) >= threshold  # similar[i, j]: documents i and j cover the same story
+    unassigned = np.ones(len(rows), dtype=bool)
+    threads = []
+    while unassigned.any():
+        lead = int(np.argmax((similar & unassigned).sum(axis=1) * unassigned))  # most matches among what's left
+        members = np.flatnonzero(similar[lead] & unassigned)
+        members = sorted(members, key=lambda j: (j != lead, -float(vectors[lead] @ vectors[j])))  # lead first, then closest
+        threads.append([rows[j][:5] for j in members])
+        unassigned[members] = False
+    return sorted(threads, key=len, reverse=True)  # biggest stories first
 
 
 def save_conversation_history(history):
