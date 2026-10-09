@@ -1,5 +1,5 @@
 # /// script
-# dependencies = ["openai"]
+# dependencies = ["openai", "mlx-lm", "faiss-cpu", "numpy"]
 # ///
 """The world's most basic agent: read input, call the model, run any tools, repeat."""
 
@@ -8,7 +8,8 @@ import os
 from openai import OpenAI
 
 from prompt import build_messages
-from tools import SCHEMAS, run_tool_call
+from database import save_conversation_history
+from tools import SCHEMAS, run_tool_call, search_memory, add_memory
 
 client = OpenAI(
     base_url="https://openrouter.ai/api/v1",  # OpenRouter speaks the OpenAI API
@@ -35,11 +36,23 @@ def main():
     while True:
         user_input = input("you> ")
         if user_input in ("", "quit", "exit"):
+            ## create a conversation summary before exiting
+            summary = respond(history, "Summarize the conversation so far, frame it as a memory as it will be stored to the memory index.")
+            add_memory(summary)
             break
+        # MEMORY HOOK 5: Proactive Recall - go search memory based on what the user just said
+        memory_results = search_memory(user_input)
+        if memory_results != "No memories yet.":
+            print("agent> (recalled from memory)")
+            print(memory_results)
+        
         answer = respond(history, user_input)
         print("agent>", answer)
         history += [{"role": "user", "content": user_input}, {"role": "assistant", "content": answer}]
+        save_conversation_history(history)  # overwrite the saved transcript with the latest one
         # MEMORY HOOK 4: write. Save this exchange to long-term memory here (embed + store)
+        
+
 
 
 if __name__ == "__main__":
