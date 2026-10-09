@@ -7,8 +7,9 @@ import urllib.request
 import xml.etree.ElementTree as ET
 
 import database
+import rerank
 from guard import injection_score, is_injection, GUARD_THRESHOLD
-from database import find_documents, find_in_conversation_history, find_memories, store_document, store_memory
+from database import find_in_conversation_history, store_document, store_memory
 
 
 def get_time():
@@ -17,13 +18,14 @@ def get_time():
     return datetime.now().isoformat(timespec="minutes")
 
 
-def search_memory(query, k=5):
-    """MEMORY HOOK 3: recall as a tool. The model decides when to look something up. Searches long-term memory only."""
-    results = find_memories(query, k)
+def search_memory(query, k=5, record=True):
+    """MEMORY HOOK 3: recall as a tool. The model decides when to look something up. Searches long-term memory only,
+    in two stages (see rerank.py). With record, the ranker learns from whether the answer cites what it found."""
+    results = rerank.search_memories(query, k, record)
     if not results:
         return "No memories yet."
-    return "\n".join(f"[{memory_id}] {content} (created at {created_at}, similarity {score:.2f})"
-                     for memory_id, content, created_at, score in results)
+    return "\n".join(f"[{memory_id}] {content} (created at {created_at}, similarity {similarity:.2f}, relevance {relevance:.2f}, rank score {score:.2f})"
+                     for memory_id, content, created_at, similarity, relevance, score in results)
 
 def add_memory(memory, tier="short_term"):
     """MEMORY HOOK 2: store as a tool. The model decides when to save something, and how important it is."""
@@ -125,11 +127,29 @@ def search_agentsweb(query, count=5):
 
 def search_documents(query, k=5):
     """Search everything the search tools have fetched before, by meaning. No network needed."""
-    results = find_documents(query, k)
+    results = rerank.search_documents(query, k)  # two stages: embeddings, then the cross-encoder and learned ranker
     if not results:
         return "No cached documents yet."
-    return "\n\n".join(untrusted(f"{title}\n{url} (from {source}, fetched {fetched_at}, similarity {score:.2f})\n{content[:500]}")
-                       for title, url, content, source, fetched_at, score in results)
+    return "\n\n".join(untrusted(f"{title}\n{url} (from {source}, fetched {fetched_at}, similarity {similarity:.2f}, "
+                                 f"relevance {relevance:.2f}, rank score {score:.2f})\n{content[:500]}")
+                       for title, url, content, source, fetched_at, similarity, relevance, score in results)
+
+
+def ranker_status():
+    """What the search ranker has learned so far: one weight per feature, for memories and for documents."""
+    lines = []
+    for kind, (weights, updates) in rerank.ranker_weights().items():
+        lines.append(f"{kind} ranker ({updates} feedback examples):")
+        lines += [f"  {name}: {weight:+.2f}" for name, weight in sorted(weights.items(), key=lambda item: -abs(item[1]))]
+    return "\n".join(lines)
+
+
+def research_reports(count=3):
+    """Reports from the scheduled research runs, newest first: what they found while nobody was watching."""
+    reports = database.recent_reports(count)
+    if not reports:
+        return "No research runs yet. Start them with: uv run agent.py --research --every 60"
+    return "\n\n".join(f"Research report from {created_at}:\n{report}" for report, created_at in reports)
 
 
 def news_threads(days=7, category=None):
@@ -173,22 +193,31 @@ def categorize_thread(thread_id, categories):
 
 def uncategorized_threads():
     """Threads with no category yet, with the closest categories by embedding, for the model to decide."""
-    threads = database.uncategorized_threads()
+    threads = database.uncategorized_threads(closest=rerank.SHORTLIST)  # stage 1: embedding similarity
     if not threads:
         return "Every thread has a category."
-    return "\n\n".join(untrusted(f"Thread {thread_id}: {title}") + "\nClosest categories: " +
-                       (", ".join(f"{name} ({score:.2f})" for score, name in suggestions) or "none yet")
-                       for thread_id, title, suggestions in threads)
+    descriptions = {name: description for name, description, _ in database.list_categories()}
+    blocks = []
+    for thread_id, title, suggestions in threads:  # stage 2: the cross-encoder reads the story and each category together
+        ranked = rerank.by_relevance(rerank.TOPIC_TASK, database.thread_lead_text(thread_id),
+                                     [(f"{name}: {descriptions[name]}", (score, name)) for score, name in suggestions], k=3)
+        blocks.append(untrusted(f"Thread {thread_id}: {title}") + "\nClosest categories: " +
+                      (", ".join(f"{name} (similarity {score:.2f}, relevance {relevance:.2f})" for relevance, (score, name) in ranked) or "none yet"))
+    return "\n\n".join(blocks)
 
 
 def unsure_documents():
     """Documents the embeddings couldn't place, with the closest threads, for the model to decide."""
-    documents = database.unsure_documents()
+    documents = database.unsure_documents(candidates=rerank.SHORTLIST)  # stage 1: the threads whose leads are most similar
     if not documents:
         return "No documents are waiting for a thread decision."
     blocks = []
-    for title, url, content, candidates in documents:
-        options = "\n".join(f"  thread {thread_id}: {thread_title} (similarity {score:.2f})" for score, thread_id, thread_title in candidates)
+    for title, url, content, candidates in documents:  # stage 2: the cross-encoder compares the document with each lead
+        ranked = rerank.by_relevance(rerank.SAME_STORY_TASK, f"{title}\n{content}",
+                                     [(database.thread_lead_text(thread_id), (score, thread_id, thread_title))
+                                      for score, thread_id, thread_title in candidates], k=3)
+        options = "\n".join(f"  thread {thread_id}: {thread_title} (similarity {score:.2f}, relevance {relevance:.2f})"
+                            for relevance, (score, thread_id, thread_title) in ranked)
         blocks.append(untrusted(f"{title}\n{url}\n{content[:400]}") + f"\nClosest threads:\n{options}")
     return "\n\n".join(blocks)
 
@@ -241,10 +270,13 @@ def explore_entity(name, type=None, depth=1):
 
 def search_entities(query):
     """Find entities by meaning: the closest ones to the query, by name, type and data."""
-    entities = database.find_entities(query)
+    entities = database.find_entities(query, rerank.CANDIDATES)  # stage 1: embedding similarity
     if not entities:
         return "The knowledge graph is empty."
-    return "\n".join(f"- {describe_entity(name, type, data)} (similarity {score:.2f})" for _, name, type, data, score in entities)
+    ranked = rerank.by_relevance(database.ENTITY_TASK, query, [(database.entity_text(name, type, json.dumps(data)), (name, type, data, score))
+                                                               for _, name, type, data, score in entities], k=10)  # stage 2
+    return "\n".join(f"- {describe_entity(name, type, data)} (similarity {score:.2f}, relevance {relevance:.2f})"
+                     for relevance, (name, type, data, score) in ranked)
 
 
 def forget_entity(name, type=None):
@@ -270,6 +302,8 @@ TOOLS = {  # name -> python function
     "search_tavily": search_tavily,
     "search_agentsweb": search_agentsweb,
     "search_documents": search_documents,
+    "ranker_status": ranker_status,
+    "research_reports": research_reports,
     "news_threads": news_threads,
     "unsure_documents": unsure_documents,
     "assign_to_thread": assign_to_thread,
@@ -346,6 +380,17 @@ SCHEMAS = [  # what the model is told about each tool (OpenAI-style function sch
         "name": "search_documents",
         "description": "Search papers and web pages fetched by earlier searches, by meaning. Try this before searching the web again.",
         "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
+    }},
+    {"type": "function", "function": {
+        "name": "ranker_status",
+        "description": "Show what the search ranker has learned: how much it weighs cross-encoder relevance, similarity, recency, "
+                       "past usefulness, story size and momentum, and each source, for memories and for documents.",
+        "parameters": {"type": "object", "properties": {}},
+    }},
+    {"type": "function", "function": {
+        "name": "research_reports",
+        "description": "Read the reports from scheduled research runs, newest first: the stories they found and what they added to the graph.",
+        "parameters": {"type": "object", "properties": {"count": {"type": "integer", "description": "How many reports (default 3)."}}},
     }},
     {"type": "function", "function": {
         "name": "news_threads",
@@ -459,10 +504,17 @@ SCHEMAS = [  # what the model is told about each tool (OpenAI-style function sch
 ]
 
 
-def run_tool_call(call):
+# A research run has no human to check its work, so it can add and sort but not touch memories or delete anything.
+AUTONOMOUS_BLOCKED = {"add_memory", "set_memory_tier", "forget_memory", "forget_entity", "forget_relationship"}
+AUTONOMOUS_SCHEMAS = [schema for schema in SCHEMAS if schema["function"]["name"] not in AUTONOMOUS_BLOCKED]
+
+
+def run_tool_call(call, blocked=()):
     """Run one tool call from the model and return the message that carries its result back."""
     args = json.loads(call.function.arguments or "{}")  # the model sends arguments as a JSON string
     try:
+        if call.function.name in blocked:  # the schema isn't offered, but a model can still name any tool
+            raise PermissionError(f"{call.function.name} isn't available in a research run")
         result = TOOLS[call.function.name](**args)  # look up the function by name and call it
     except Exception as error:  # a flaky search API shouldn't crash the agent; tell the model instead
         result = f"Tool error: {error}"

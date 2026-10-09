@@ -29,7 +29,9 @@ else:
     EMBED_MODEL = os.getenv("EMBED_MODEL", "qwen/qwen3-embedding-8b")
     embed_client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=os.environ["OPENROUTER_API_KEY"])
 
-memory_database = sqlite3.connect("memory.db")  # SQLite holds the text AND its embedding; FAISS is rebuilt from it
+# SQLite holds the text AND its embedding; FAISS is rebuilt from it. The timeout lets a scheduled research run and
+# a chat session share the file: a write waits up to 30 seconds for the other one's to finish.
+memory_database = sqlite3.connect("memory.db", timeout=30)
 memory_cursor = memory_database.cursor()
 memory_cursor.execute("CREATE TABLE IF NOT EXISTS memories (content TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
 if "embedding" not in [col[1] for col in memory_cursor.execute("PRAGMA table_info(memories)")]:
@@ -47,6 +49,7 @@ memory_cursor.execute("""CREATE TABLE IF NOT EXISTS threads (
 memory_cursor.execute("CREATE TABLE IF NOT EXISTS categories (id INTEGER PRIMARY KEY, name TEXT UNIQUE, description TEXT, embedding BLOB)")
 memory_cursor.execute("""CREATE TABLE IF NOT EXISTS thread_categories (
     thread_id INTEGER, category_id INTEGER, status TEXT, PRIMARY KEY (thread_id, category_id))""")  # a story can be in several
+memory_cursor.execute("CREATE TABLE IF NOT EXISTS reports (report TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")  # autonomous runs
 memory_cursor.execute("CREATE TABLE IF NOT EXISTS conversation_history (conversation_json TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
 memory_cursor.execute("""CREATE TABLE IF NOT EXISTS entities (
     id INTEGER PRIMARY KEY, name TEXT COLLATE NOCASE, type TEXT COLLATE NOCASE DEFAULT '', data TEXT DEFAULT '{}',
@@ -109,6 +112,19 @@ embedding_dimension = len(embed("dimension check"))  # 1024 for 0.6B, 4096 for 8
 memory_index = build_index("memories", embedding_dimension)
 document_index = build_index("documents", embedding_dimension)  # kept apart so web pages don't crowd out memories
 entity_index = build_index("entities", embedding_dimension)  # knowledge graph nodes, found by meaning as well as by name
+seen_version = memory_cursor.execute("PRAGMA data_version").fetchone()[0]  # changes when ANOTHER process commits
+
+
+def refresh_indexes():
+    """Each running agent keeps its own FAISS indexes in memory. If another process (like a scheduled research run)
+    has written to memory.db since we last looked, rebuild them so its new memories, documents and entities show up."""
+    global seen_version, memory_index, document_index, entity_index
+    version = memory_cursor.execute("PRAGMA data_version").fetchone()[0]
+    if version != seen_version:
+        seen_version = version
+        memory_index = build_index("memories", embedding_dimension)
+        document_index = build_index("documents", embedding_dimension)
+        entity_index = build_index("entities", embedding_dimension)
 
 
 def normalize(text):
@@ -230,6 +246,7 @@ def forget_memory(memory_id):
 def find_memories(query, k=5):
     """Return (id, content, created_at, similarity) for the k long-term memories closest in meaning to the query.
     Core and short-term memories are already in the prompt, so they aren't searched."""
+    refresh_indexes()
     if memory_index.ntotal == 0:
         return []
     scores, rowids = memory_index.search(embed(query, task=MEMORY_TASK)[None, :], memory_index.ntotal)  # all, then keep long-term
@@ -275,6 +292,7 @@ def store_document(url, title, content, source, query):
 
 def find_documents(query, k=5):
     """Return (title, url, content, source, fetched_at, similarity) for the k cached documents closest to the query."""
+    refresh_indexes()
     if document_index.ntotal == 0:
         return []
     scores, rowids = document_index.search(embed(query, task=DOCUMENT_TASK)[None, :], min(k, document_index.ntotal))
@@ -377,12 +395,19 @@ def merge_threads(from_thread_id, into_thread_id):
     tidy_thread(from_thread_id)
 
 
-def unsure_documents(limit=10):
-    """Return documents the embeddings couldn't place, each as (title, url, content, candidates)."""
+def unsure_documents(limit=10, candidates=3):
+    """Return documents the embeddings couldn't place, each as (title, url, content, closest threads)."""
     rows = memory_cursor.execute("SELECT title, url, content, embedding FROM documents WHERE thread_status = 'unsure' "
                                  "ORDER BY rowid LIMIT ?", (limit,)).fetchall()
-    return [(title, url, content, thread_candidates(np.frombuffer(blob, dtype=np.float32)))
+    return [(title, url, content, thread_candidates(np.frombuffer(blob, dtype=np.float32), candidates))
             for title, url, content, blob in rows]
+
+
+def thread_lead_text(thread_id):
+    """The title and text of a thread's lead document: what the story is about."""
+    title, content = memory_cursor.execute("SELECT documents.title, documents.content FROM threads JOIN documents "
+                                           "ON documents.rowid = threads.lead_rowid WHERE threads.id = ?", (thread_id,)).fetchone()
+    return f"{title}\n{content}"
 
 
 def list_threads(days=7, category=None):
@@ -467,11 +492,11 @@ def set_thread_categories(thread_id, names):
     memory_database.commit()
 
 
-def uncategorized_threads(limit=10):
+def uncategorized_threads(limit=10, closest=3):
     """Return threads with no category yet, as (thread_id, title, [(similarity, name)] closest categories)."""
     rows = memory_cursor.execute("SELECT id, title FROM threads WHERE id NOT IN (SELECT thread_id FROM thread_categories) "
                                  "ORDER BY id LIMIT ?", (limit,)).fetchall()
-    return [(thread_id, title, [(score, name) for score, _, name in category_scores(thread_id)[:3]]) for thread_id, title in rows]
+    return [(thread_id, title, [(score, name) for score, _, name in category_scores(thread_id)[:closest]]) for thread_id, title in rows]
 
 
 def thread_category_names(thread_id):
@@ -582,6 +607,7 @@ def neighborhood(name, type=None, depth=1):
 
 def find_entities(query, k=10):
     """Return (id, name, type, data, similarity) for the k entities closest in meaning to the query."""
+    refresh_indexes()
     if entity_index.ntotal == 0:
         return []
     scores, ids = entity_index.search(embed(query, task=ENTITY_TASK)[None, :], min(k, entity_index.ntotal))
@@ -611,6 +637,16 @@ prune_memories()  # short-term memories may have aged out since the last run
 # Thread any documents cached before threads existed.
 for rowid, title, blob in memory_cursor.execute("SELECT rowid, title, embedding FROM documents WHERE thread_status IS NULL ORDER BY rowid").fetchall():
     auto_thread(rowid, np.frombuffer(blob, dtype=np.float32), title)
+
+
+def save_report(report):
+    memory_cursor.execute("INSERT INTO reports (report) VALUES (?)", (report,))
+    memory_database.commit()
+
+
+def recent_reports(count=3):
+    """Return (report, created_at) for the newest autonomous research reports, newest first."""
+    return memory_cursor.execute("SELECT report, created_at FROM reports ORDER BY rowid DESC LIMIT ?", (count,)).fetchall()
 
 
 def save_conversation_history(history):

@@ -90,6 +90,23 @@ The model chooses the tier when it calls `add_memory`. It can also move memories
 
 `add_memory` doesn't save duplicates. A memory that's identical to, or contained in, an existing memory is skipped, and a new memory that contains an older one replaces it, so only the most complete version is kept.
 
+### Two-stage search that learns
+
+`search_memory` and `search_documents` search in two stages, the way [MTEB's two-stage reranking](https://docs.mteb.org/get_started/advanced_usage/two_stage_reranking/) does:
+
+| Stage | What runs | Why |
+|---|---|---|
+| 1. Retrieve | FAISS finds the 30 stored embeddings closest to the query's. | Fast enough to search everything, but the query and the text were embedded separately, so it only knows they're about the same thing. |
+| 2. Re-rank | A cross-encoder, `Qwen3-Reranker-0.6B`, reads the query and each candidate together and scores whether the candidate answers it. | Much more accurate, and too slow to run on everything, which is why stage 1 narrows things down first. |
+
+The same cross-encoder also orders the suggestions in `search_entities`, `unsure_documents` (closest threads) and `uncategorized_threads` (closest categories), so you see relevance next to similarity, with the most relevant first. The automatic thread and category thresholds still use similarity, which is cheap enough to run on every fetched document.
+
+A small learned model then blends the cross-encoder's score with things neither stage knows about: how recent a result is, whether it helped before, which search source it came from, and for news, how big and how fast-growing its story is *compared with the other stories right now*. Those story features are relative, so a story slides down the rankings when other stories take off, even if nothing about it changed.
+
+The model learns from citations. After each answer, every result the agent was shown counts as useful if the answer cites it (a memory's `[id]` or a document's link) and not useful if it doesn't, and the weights take one small step toward whatever the useful ones had in common. It starts out trusting the cross-encoder alone. Ask the agent to run `ranker_status` to see what it has learned. The training examples are in the `rank_feedback` table, and the current weights are in `ranker`. The code is in `rerank.py`.
+
+On Apple Silicon the cross-encoder runs locally through MLX (about 350 MB, downloaded on the first search). Elsewhere a chat model on OpenRouter scores the candidates instead (`RERANK_MODEL`, default `anthropic/claude-haiku-5.5`), which costs a little per search. Set `RERANK_BACKEND` to `mlx` or `openrouter` to choose.
+
 ### Knowledge graph
 
 Memories are sentences. Some knowledge is better stored as a graph: things, and how they're connected. The agent keeps one in two tables in `memory.db`:
@@ -104,6 +121,26 @@ The model calls `add_entity` and `add_relationship` to store what it learns. `ad
 Names are matched ignoring case. Two entities can share a name if their types differ, like `Apple` the company and `Apple` the fruit; the model then has to say which type it means.
 
 Everything fetched from the web is wrapped in `<untrusted_document>` tags, and the system prompt tells the model to treat it as data to evaluate critically, never as instructions.
+
+### Research mode: running on its own
+
+The agent can also run headless, as a researcher. It follows a standing brief: check your categories and threads, search for what's new, sort documents onto threads, categorize them, add what it learns to the knowledge graph, and write a report.
+
+```bash
+uv run agent.py --research                    # one run, then exit
+uv run agent.py --research --every 60         # a run every 60 minutes, until you stop it
+uv run agent.py --research --brief brief.md   # your own brief instead of the default one
+```
+
+Each run prints the tools it calls, then its report. Reports are also saved in the `reports` table, so in a normal chat you can ask "what did the research runs find?" and the agent reads them with `research_reports`. You can chat while research runs in another terminal. Both share `memory.db`, and each one picks up what the other wrote before it searches.
+
+Nobody checks a research run's work, so it gets fewer tools. It can search, sort, categorize and add to the graph, but it can't add, move or forget memories, and it can't delete anything. Each run is capped at 40 model calls (`--max-steps`), which also caps what it can spend.
+
+To start runs on a schedule instead of leaving a terminal open, use cron (or launchd on a Mac). For example, every two hours:
+
+```
+0 */2 * * * cd /path/to/minimal-agent && OPENROUTER_API_KEY=sk-or-... /path/to/uv run agent.py --research >> research.log 2>&1
+```
 
 ### Using a different model
 
@@ -123,6 +160,7 @@ The model has to support tool calling. If you get errors about tools, try a diff
 | `prompt.py` | Builds the list of messages the model sees: the system prompt, the conversation so far, and your new message. |
 | `tools.py` | The tools the model can call (`get_time`, memory tools, knowledge graph tools, and web search: `search_arxiv`, `search_tavily`, `search_agentsweb`), plus the descriptions the model reads to decide when to use them. |
 | `database.py` | Storage. Saves memories and the conversation to `memory.db` (SQLite), turns text into embeddings, and searches them with FAISS. |
+| `rerank.py` | Stage 2 of search: a cross-encoder re-scores what FAISS found, and a small model learns from the agent's citations what else makes a result useful. |
 
 One turn of the conversation goes like this:
 
