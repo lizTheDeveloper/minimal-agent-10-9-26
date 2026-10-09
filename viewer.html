@@ -1,0 +1,353 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Memory Viewer</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js" integrity="sha384-CjloA8y00+1SDAUkjs099PVfnY2KmDC2BZnws9kh8D/lX1s46w6EPhpXdqMfjK6i" crossorigin="anonymous"></script>
+<style>
+  :root {
+    --bg: #f7f7f5; --panel: #ffffff; --ink: #1d1d1f; --muted: #6b6b70; --line: #e2e2e0;
+    --accent: #3b6fd8; --edge: #b8b8bc; --chip: #eef1f8; --flash: #f2b84b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #151517; --panel: #1f1f22; --ink: #ececef; --muted: #9a9aa2; --line: #333338;
+            --accent: #7aa2ff; --edge: #55555c; --chip: #2a2d36; --flash: #f2b84b; }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink);
+               font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  header { display: flex; align-items: center; gap: 16px; padding: 10px 16px; border-bottom: 1px solid var(--line);
+           background: var(--panel); height: 52px; }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; }
+  nav button { background: none; border: 0; color: var(--muted); font: inherit; padding: 6px 10px; border-radius: 6px; cursor: pointer; }
+  nav button.active { background: var(--chip); color: var(--ink); font-weight: 600; }
+  #status { margin-left: auto; color: var(--muted); font-size: 12px; display: flex; align-items: center; gap: 6px; }
+  #dot { width: 8px; height: 8px; border-radius: 50%; background: #3cb371; }
+  #dot.off { background: #d9534f; }
+  input[type=search] { font: inherit; padding: 6px 10px; border: 1px solid var(--line); border-radius: 6px;
+                       background: var(--bg); color: var(--ink); width: 220px; }
+  main { height: calc(100% - 52px); }
+  .view { display: none; height: 100%; }
+  .view.active { display: flex; }
+
+  /* graph */
+  #graph-wrap { flex: 1; position: relative; overflow: hidden; }
+  #graph { width: 100%; height: 100%; display: block; cursor: grab; }
+  #graph-tools { position: absolute; top: 12px; left: 12px; display: flex; flex-direction: column; gap: 8px; }
+  #legend { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; font-size: 12px; max-height: 50vh; overflow: auto; }
+  #legend label { display: flex; align-items: center; gap: 6px; cursor: pointer; white-space: nowrap; }
+  #legend .sw { width: 10px; height: 10px; border-radius: 50%; flex: none; }
+  #empty { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; color: var(--muted); text-align: center; padding: 16px; }
+  .link { stroke: var(--edge); stroke-width: 1.4; }
+  .link-label { fill: var(--muted); font-size: 10px; pointer-events: none; }
+  .node circle { stroke: var(--panel); stroke-width: 2; cursor: pointer; }
+  .node text { fill: var(--ink); font-size: 11px; pointer-events: none; paint-order: stroke; stroke: var(--bg); stroke-width: 3px; }
+  .dim { opacity: 0.12; }
+  .node.selected circle { stroke: var(--ink); stroke-width: 3; }
+  .node.fresh circle { stroke: var(--flash); stroke-width: 4; }
+
+  aside { width: 360px; border-left: 1px solid var(--line); background: var(--panel); overflow: auto; padding: 16px; }
+  aside h2 { margin: 0 0 2px; font-size: 18px; }
+  aside h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 18px 0 6px; }
+  .type { display: inline-block; font-size: 11px; padding: 1px 8px; border-radius: 10px; color: #fff; }
+  .meta { color: var(--muted); font-size: 12px; }
+  table.kv { width: 100%; border-collapse: collapse; font-size: 13px; }
+  table.kv td { border-top: 1px solid var(--line); padding: 5px 4px; vertical-align: top; word-break: break-word; }
+  table.kv td:first-child { color: var(--muted); width: 35%; }
+  ul.rels { list-style: none; padding: 0; margin: 0; }
+  ul.rels li { padding: 6px 0; border-top: 1px solid var(--line); }
+  ul.rels a { color: var(--accent); cursor: pointer; text-decoration: none; }
+  ul.rels .rel { font-family: ui-monospace, Menlo, monospace; font-size: 12px; color: var(--muted); }
+  ul.rels .edge-data { font-size: 12px; color: var(--muted); margin-top: 2px; }
+
+  /* news */
+  #news { flex-direction: column; overflow: auto; padding: 16px; gap: 14px; align-items: center; }
+  #news-inner { width: 100%; max-width: 900px; display: flex; flex-direction: column; gap: 14px; }
+  .thread { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+  .thread.fresh { box-shadow: 0 0 0 2px var(--flash); }
+  .thread-head { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+  .thread-head h2 { font-size: 16px; margin: 0; }
+  .chip { background: var(--chip); border-radius: 10px; padding: 1px 8px; font-size: 11px; }
+  .chip.model { outline: 1px dashed var(--muted); }
+  .doc { padding: 8px 0 8px 12px; border-left: 3px solid var(--line); margin-top: 8px; }
+  .doc.lead { border-left-color: var(--accent); }
+  .doc a { color: var(--ink); font-weight: 600; text-decoration: none; }
+  .doc a:hover { color: var(--accent); }
+  .doc details summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+  .doc .excerpt { font-size: 13px; color: var(--muted); white-space: pre-wrap; margin-top: 4px; }
+  .summary-row { color: var(--muted); font-size: 13px; }
+
+  @media (max-width: 760px) {
+    .view.active { flex-direction: column; }
+    aside { width: 100%; height: 45%; border-left: 0; border-top: 1px solid var(--line); }
+    input[type=search] { width: 130px; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Memory Viewer</h1>
+  <nav><button data-view="graph" class="active">Graph</button><button data-view="news">News</button></nav>
+  <input type="search" id="search" placeholder="Filter…">
+  <div id="status"><span id="dot"></span><span id="status-text">connecting…</span></div>
+</header>
+<main>
+  <section class="view active" id="graph-view">
+    <div id="graph-wrap">
+      <svg id="graph"></svg>
+      <div id="graph-tools"><div id="legend"></div></div>
+      <div id="empty">No entities yet.<br>They'll appear here live as the agent adds them to the knowledge graph.</div>
+    </div>
+    <aside id="details"><p class="meta">Click an entity to see its metadata and relationships. Drag to move, scroll to zoom.</p></aside>
+  </section>
+  <section class="view" id="news"><div id="news-inner"></div></section>
+</main>
+
+<script>
+const color = d3.scaleOrdinal(["#4e79a7","#f28e2b","#e15759","#76b7b2","#59a14f","#edc948","#b07aa1","#ff9da7","#9c755f","#86bcb6"]);
+const hiddenTypes = new Set();
+let filter = "", selectedId = null, graphData = {entities: [], relationships: []}, newsData = null;
+let knownEntities = null, knownThreads = null;  // ids seen on the previous fetch, to flash what's new
+
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const typeName = t => t || "untyped";
+
+// ---------- tabs & search ----------
+document.querySelectorAll("nav button").forEach(b => b.onclick = () => {
+  document.querySelectorAll("nav button").forEach(x => x.classList.toggle("active", x === b));
+  document.getElementById("graph-view").classList.toggle("active", b.dataset.view === "graph");
+  document.getElementById("news").classList.toggle("active", b.dataset.view === "news");
+  if (b.dataset.view === "graph") simulation.alpha(0.1).restart();
+});
+document.getElementById("search").oninput = e => { filter = e.target.value.toLowerCase(); applyHighlight(); renderNews(); };
+
+// ---------- graph ----------
+const svg = d3.select("#graph");
+const root = svg.append("g");
+svg.append("defs").append("marker").attr("id", "arrow").attr("viewBox", "0 -5 10 10").attr("refX", 10).attr("refY", 0)
+  .attr("markerWidth", 7).attr("markerHeight", 7).attr("orient", "auto")
+  .append("path").attr("d", "M0,-5L10,0L0,5").attr("fill", "var(--edge)");
+svg.call(d3.zoom().scaleExtent([0.1, 6]).on("zoom", e => root.attr("transform", e.transform)));
+svg.on("click", e => { if (e.target === svg.node()) select(null); });
+let linkLayer = root.append("g"), labelLayer = root.append("g"), nodeLayer = root.append("g");
+const nodesById = new Map();  // keeps x/y between refreshes so the layout doesn't jump
+
+const simulation = d3.forceSimulation()
+  .force("link", d3.forceLink().id(d => d.id).distance(150))
+  .force("charge", d3.forceManyBody().strength(-600))
+  .force("collide", d3.forceCollide(d => radius(d) + 6))
+  .force("x", d3.forceX().strength(0.04)).force("y", d3.forceY().strength(0.04))
+  .on("tick", ticked);
+
+let degree = new Map();
+const radius = d => 7 + Math.min(14, Math.sqrt(degree.get(d.id) || 0) * 3);
+
+function renderGraph() {
+  const {width, height} = document.getElementById("graph").getBoundingClientRect();
+  svg.attr("viewBox", [-width / 2, -height / 2, width, height]);
+  document.getElementById("empty").style.display = graphData.entities.length ? "none" : "flex";
+
+  const nodes = graphData.entities.filter(e => !hiddenTypes.has(typeName(e.type))).map(e => {
+    const old = nodesById.get(e.id);
+    return Object.assign(old || {}, e);
+  });
+  nodesById.clear(); nodes.forEach(n => nodesById.set(n.id, n));
+  const links = graphData.relationships.filter(r => nodesById.has(r.source_id) && nodesById.has(r.target_id))
+    .map(r => ({...r, source: r.source_id, target: r.target_id}));
+  degree = new Map();
+  links.forEach(l => { degree.set(l.source, (degree.get(l.source) || 0) + 1); degree.set(l.target, (degree.get(l.target) || 0) + 1); });
+  // curve parallel edges between the same pair so their labels don't overlap
+  const pairCount = new Map();
+  links.forEach(l => { const k = [l.source, l.target].sort().join("-"); l.bend = pairCount.get(k) || 0; pairCount.set(k, l.bend + 1); });
+
+  linkLayer.selectAll("path").data(links, d => d.id).join("path").attr("class", "link").attr("fill", "none").attr("marker-end", "url(#arrow)");
+  labelLayer.selectAll("text").data(links, d => d.id).join("text").attr("class", "link-label").attr("text-anchor", "middle").text(d => d.relation);
+
+  const node = nodeLayer.selectAll("g.node").data(nodes, d => d.id).join(enter => {
+    const g = enter.append("g").attr("class", "node");
+    g.append("circle");
+    g.append("text").attr("dy", "0.35em");
+    g.append("title");
+    g.call(d3.drag()
+      .on("start", (e, d) => { if (!e.active) simulation.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; })
+      .on("drag", (e, d) => { d.fx = e.x; d.fy = e.y; })
+      .on("end", (e, d) => { if (!e.active) simulation.alphaTarget(0); d.fx = null; d.fy = null; }));
+    g.on("click", (e, d) => { e.stopPropagation(); select(d.id); });
+    return g;
+  });
+  node.select("circle").attr("r", radius).attr("fill", d => color(typeName(d.type)));
+  node.select("text").attr("x", d => radius(d) + 4).text(d => d.name);
+  node.select("title").text(d => `${d.name} (${typeName(d.type)})`);
+
+  if (knownEntities) {
+    node.filter(d => !knownEntities.has(d.id)).classed("fresh", true)
+      .transition().delay(4000).on("end", function () { d3.select(this).classed("fresh", false); });
+  }
+
+  simulation.nodes(nodes);
+  simulation.force("link").links(links);
+  simulation.alpha(knownEntities ? 0.3 : 1).restart();
+  renderLegend();
+  applyHighlight();
+  if (selectedId != null) renderDetails(selectedId);
+}
+
+function linkPath(d) {
+  const sr = radius(d.source), tr = radius(d.target) + 2;
+  const dx = d.target.x - d.source.x, dy = d.target.y - d.source.y, len = Math.hypot(dx, dy) || 1;
+  const sx = d.source.x + dx / len * sr, sy = d.source.y + dy / len * sr;
+  const tx = d.target.x - dx / len * tr, ty = d.target.y - dy / len * tr;
+  if (d.source === d.target) {  // self-loop
+    const x = d.source.x, y = d.source.y - sr;
+    return `M${x - 4},${y} C${x - 30},${y - 40} ${x + 30},${y - 40} ${x + 4},${y}`;
+  }
+  if (!d.bend) return `M${sx},${sy}L${tx},${ty}`;
+  const off = 28 * d.bend * (d.source.id < d.target.id ? 1 : -1);
+  const mx = (sx + tx) / 2 - dy / len * off, my = (sy + ty) / 2 + dx / len * off;
+  return `M${sx},${sy}Q${mx},${my} ${tx},${ty}`;
+}
+
+function ticked() {
+  linkLayer.selectAll("path").attr("d", linkPath);
+  labelLayer.selectAll("text").attr("x", d => {
+    const off = d.bend ? 14 * d.bend * (d.source.id < d.target.id ? 1 : -1) : 0;
+    const dx = d.target.x - d.source.x, dy = d.target.y - d.source.y, len = Math.hypot(dx, dy) || 1;
+    return d.source === d.target ? d.source.x : (d.source.x + d.target.x) / 2 - dy / len * off;
+  }).attr("y", d => {
+    const off = d.bend ? 14 * d.bend * (d.source.id < d.target.id ? 1 : -1) : 0;
+    const dx = d.target.x - d.source.x, dy = d.target.y - d.source.y, len = Math.hypot(dx, dy) || 1;
+    return d.source === d.target ? d.source.y - radius(d.source) - 32 : (d.source.y + d.target.y) / 2 + dx / len * off - 3;
+  });
+  nodeLayer.selectAll("g.node").attr("transform", d => `translate(${d.x},${d.y})`);
+}
+
+function renderLegend() {
+  const counts = d3.rollup(graphData.entities, v => v.length, e => typeName(e.type));
+  const types = [...counts.keys()].sort();
+  document.getElementById("legend").innerHTML =
+    `<div class="meta" style="margin-bottom:4px">${graphData.entities.length} entities · ${graphData.relationships.length} links</div>` +
+    types.map(t => `<label><input type="checkbox" data-type="${esc(t)}" ${hiddenTypes.has(t) ? "" : "checked"}>
+      <span class="sw" style="background:${color(t)}"></span>${esc(t)} <span class="meta">${counts.get(t)}</span></label>`).join("");
+  document.querySelectorAll("#legend input").forEach(cb => cb.onchange = () => {
+    cb.checked ? hiddenTypes.delete(cb.dataset.type) : hiddenTypes.add(cb.dataset.type);
+    renderGraph();
+  });
+}
+
+function matches(e) {
+  if (!filter) return true;
+  return (e.name + " " + e.type + " " + JSON.stringify(e.data)).toLowerCase().includes(filter);
+}
+
+function applyHighlight() {
+  let focus = null;
+  if (selectedId != null) {
+    focus = new Set([selectedId]);
+    graphData.relationships.forEach(r => {
+      if (r.source_id === selectedId) focus.add(r.target_id);
+      if (r.target_id === selectedId) focus.add(r.source_id);
+    });
+  }
+  const visible = d => (!focus || focus.has(d.id)) && matches(d);
+  nodeLayer.selectAll("g.node").classed("dim", d => !visible(d)).classed("selected", d => d.id === selectedId);
+  const linkVisible = l => visible(l.source) && visible(l.target) && (!focus || l.source.id === selectedId || l.target.id === selectedId);
+  linkLayer.selectAll("path").classed("dim", d => !linkVisible(d));
+  labelLayer.selectAll("text").classed("dim", d => !linkVisible(d));
+}
+
+function select(id) {
+  selectedId = id;
+  applyHighlight();
+  if (id == null) {
+    document.getElementById("details").innerHTML = `<p class="meta">Click an entity to see its metadata and relationships. Drag to move, scroll to zoom.</p>`;
+  } else renderDetails(id);
+}
+
+function dataTable(data) {
+  const entries = Object.entries(data || {});
+  if (!entries.length) return `<p class="meta">No metadata.</p>`;
+  return `<table class="kv">${entries.map(([k, v]) =>
+    `<tr><td>${esc(k)}</td><td>${esc(typeof v === "object" ? JSON.stringify(v, null, 1) : v)}</td></tr>`).join("")}</table>`;
+}
+
+function renderDetails(id) {
+  const e = graphData.entities.find(x => x.id === id);
+  if (!e) { select(null); return; }
+  const byId = new Map(graphData.entities.map(x => [x.id, x]));
+  const out = graphData.relationships.filter(r => r.source_id === id);
+  const inc = graphData.relationships.filter(r => r.target_id === id);
+  const relItem = (r, otherId, arrow) => {
+    const other = byId.get(otherId);
+    const extra = Object.keys(r.data || {}).length ? `<div class="edge-data">${esc(Object.entries(r.data).map(([k, v]) => `${k}: ${typeof v === "object" ? JSON.stringify(v) : v}`).join(" · "))}</div>` : "";
+    return `<li>${arrow === "out" ? `<span class="rel">${esc(r.relation)} →</span> ` : ""}<a data-id="${otherId}">${esc(other?.name)}</a>${arrow === "in" ? ` <span class="rel">→ ${esc(r.relation)}</span>` : ""}
+      <span class="meta">#${r.id}</span>${extra}</li>`;
+  };
+  document.getElementById("details").innerHTML = `
+    <h2>${esc(e.name)}</h2>
+    <span class="type" style="background:${color(typeName(e.type))}">${esc(typeName(e.type))}</span>
+    <span class="meta">&nbsp;id ${e.id} · added ${esc(e.created_at)}</span>
+    <h3>Metadata</h3>${dataTable(e.data)}
+    <h3>Outgoing (${out.length})</h3><ul class="rels">${out.map(r => relItem(r, r.target_id, "out")).join("") || `<li class="meta">None</li>`}</ul>
+    <h3>Incoming (${inc.length})</h3><ul class="rels">${inc.map(r => relItem(r, r.source_id, "in")).join("") || `<li class="meta">None</li>`}</ul>`;
+  document.querySelectorAll("#details a[data-id]").forEach(a => a.onclick = () => select(+a.dataset.id));
+}
+
+// ---------- news ----------
+const openExcerpts = new Set();  // so a live refresh doesn't collapse what you're reading
+document.getElementById("news").addEventListener("toggle", e => {
+  if (e.target.dataset.url) e.target.open ? openExcerpts.add(e.target.dataset.url) : openExcerpts.delete(e.target.dataset.url);
+}, true);
+function docMatches(d) {
+  return !filter || `${d.title} ${d.url} ${d.source} ${d.query} ${d.excerpt}`.toLowerCase().includes(filter);
+}
+function docHtml(d, lead) {
+  return `<div class="doc ${lead ? "lead" : ""}">
+    <a href="${esc(d.url)}" target="_blank" rel="noopener">${esc(d.title || d.url)}</a>
+    <div class="meta">${esc(d.source)} · ${esc(d.fetched_at)}${d.thread_status ? ` · ${esc(d.thread_status)}` : ""}${d.query ? ` · query: “${esc(d.query)}”` : ""}</div>
+    <details data-url="${esc(d.url)}" ${openExcerpts.has(d.url) ? "open" : ""}><summary>excerpt</summary><div class="excerpt">${esc(d.excerpt)}</div></details>
+  </div>`;
+}
+function renderNews() {
+  if (!newsData) return;
+  const threads = newsData.threads.filter(t => !filter || t.title.toLowerCase().includes(filter) || t.documents.some(docMatches));
+  const unthreaded = newsData.unthreaded.filter(docMatches);
+  const totalDocs = newsData.threads.reduce((n, t) => n + t.documents.length, 0) + newsData.unthreaded.length;
+  document.getElementById("news-inner").innerHTML =
+    `<div class="summary-row">${newsData.threads.length} stories · ${totalDocs} documents · ${newsData.unthreaded.length} not in a story</div>` +
+    threads.map(t => `<div class="thread ${knownThreads && !knownThreads.has(t.id) ? "fresh" : ""}">
+      <div class="thread-head"><h2>${esc(t.title)}</h2>
+        ${t.categories.map(c => `<span class="chip ${c.status === "model" ? "model" : ""}" title="${esc(c.status)}">${esc(c.name)}</span>`).join("")}
+        <span class="meta">${t.documents.length} source${t.documents.length === 1 ? "" : "s"} · thread #${t.id}</span></div>
+      ${t.documents.map((d, i) => docHtml(d, i === 0 && d.rowid === t.lead_rowid)).join("")}
+    </div>`).join("") +
+    (unthreaded.length ? `<div class="thread"><div class="thread-head"><h2>Not in a story</h2><span class="meta">${unthreaded.length}</span></div>
+      ${unthreaded.map(d => docHtml(d, false)).join("")}</div>` : "");
+}
+
+// ---------- live updates ----------
+let version = null;
+async function refresh() {
+  const [g, n] = await Promise.all([fetch("/api/graph").then(r => r.json()), fetch("/api/news").then(r => r.json())]);
+  graphData = g; newsData = n;
+  renderGraph(); renderNews();
+  knownEntities = new Set(g.entities.map(e => e.id));
+  knownThreads = new Set(n.threads.map(t => t.id));
+}
+async function poll() {
+  const dot = document.getElementById("dot"), text = document.getElementById("status-text");
+  try {
+    const v = (await fetch("/api/version").then(r => r.json())).version;
+    if (v !== version) { version = v; await refresh(); text.textContent = "updated " + new Date().toLocaleTimeString(); }
+    else if (!text.textContent.startsWith("updated")) text.textContent = "live";
+    dot.classList.remove("off");
+  } catch (err) {
+    dot.classList.add("off"); text.textContent = "viewer server not reachable";
+  }
+  setTimeout(poll, 1500);
+}
+window.addEventListener("resize", () => graphData && renderGraph());
+poll();
+</script>
+</body>
+</html>

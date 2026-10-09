@@ -4,6 +4,8 @@
 #   "faiss-cpu",
 #   "numpy",
 #   "prompt_toolkit",
+#   "transformers",  # Prompt Guard 2, a local prompt-injection classifier (see guard.py)
+#   "torch",
 #   "mlx-lm; sys_platform == 'darwin' and platform_machine == 'arm64'",  # local embeddings, Apple Silicon only
 # ]
 # ///
@@ -43,7 +45,7 @@ def main():
     session = PromptSession()  # unlike input(), a multi-line paste arrives as one message
     while True:
         user_input = session.prompt("you> ")
-        if user_input in ("", "quit", "exit"):
+        if user_input in ("quit", "exit"):
             ## create a conversation summary before exiting
             summary = respond(history, "Summarize the conversation so far, frame it as a memory as it will be stored to the memory index.")
             add_memory(summary)

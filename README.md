@@ -70,7 +70,38 @@ Without the key the agent still runs; the Tavily tool just tells the model it is
 
 Every result these tools fetch is cleaned up, embedded and saved in the `documents` table of `memory.db`. The `search_documents` tool searches that cache by meaning, without going back to the web. Documents have their own search index, separate from memories, so web pages don't crowd out things the agent was told to remember.
 
-The `news_threads` tool groups recently cached documents into stories, like [memeorandum](https://www.memeorandum.com/): a lead article plus the other coverage of the same story, matched by embedding similarity so different headlines still land together.
+The `news_threads` tool lists recent stories, like [memeorandum](https://www.memeorandum.com/): a lead article plus the other coverage of the same story, even when the headlines differ. Every fetched document is compared with each story's lead article:
+
+| Similarity to the closest story | What happens |
+|---|---|
+| 0.6 or more | Joins that story automatically. |
+| Below 0.45 | Starts a new story automatically. |
+| In between | Embeddings can't tell, so the language model decides. It reads the document and the closest stories with `unsure_documents`, then calls `assign_to_thread` or `new_thread`. It can also `merge_threads` that turn out to be one story. |
+
+Memories come in three tiers:
+
+| Tier | Where the model sees it | What goes there |
+|---|---|---|
+| Core | In the system prompt, every turn | A few lasting facts, like your name or standing preferences. Capped at 20. |
+| Short-term | In the system prompt, every turn | New memories. A memory moves down to long-term after 3 days, or when there are more than 20 short-term memories. |
+| Long-term | Only through the `search_memory` tool | Everything older. |
+
+The model chooses the tier when it calls `add_memory`. It can also move memories between tiers with `set_memory_tier`, and delete ones that are wrong with `forget_memory`.
+
+`add_memory` doesn't save duplicates. A memory that's identical to, or contained in, an existing memory is skipped, and a new memory that contains an older one replaces it, so only the most complete version is kept.
+
+### Knowledge graph
+
+Memories are sentences. Some knowledge is better stored as a graph: things, and how they're connected. The agent keeps one in two tables in `memory.db`:
+
+| Table | Holds | Example |
+|---|---|---|
+| `entities` | Any noun, with a name, a type, and any JSON data | `Ada Lovelace` (person) `{"born": 1815}` |
+| `relationships` | A link from one entity to another, with a relation name and any JSON data | `Ada Lovelace -worked_with-> Charles Babbage` `{"from": 1833}` |
+
+The model calls `add_entity` and `add_relationship` to store what it learns. `add_relationship` creates any entity that doesn't exist yet, and adding something that's already there merges the new JSON into the old. `explore_entity` shows an entity and everything connected to it (pass `depth` to follow links further out), `search_entities` finds entities by a word in their name, type or data, and `forget_entity` and `forget_relationship` delete things that are wrong.
+
+Names are matched ignoring case. Two entities can share a name if their types differ, like `Apple` the company and `Apple` the fruit; the model then has to say which type it means.
 
 Everything fetched from the web is wrapped in `<untrusted_document>` tags, and the system prompt tells the model to treat it as data to evaluate critically, never as instructions.
 
@@ -90,7 +121,7 @@ The model has to support tool calling. If you get errors about tools, try a diff
 |---|---|
 | `agent.py` | The main loop. It reads your input, calls the model, runs any tools the model asks for, and prints the answer. |
 | `prompt.py` | Builds the list of messages the model sees: the system prompt, the conversation so far, and your new message. |
-| `tools.py` | The tools the model can call (`get_time`, memory tools, and web search: `search_arxiv`, `search_tavily`, `search_agentsweb`), plus the descriptions the model reads to decide when to use them. |
+| `tools.py` | The tools the model can call (`get_time`, memory tools, knowledge graph tools, and web search: `search_arxiv`, `search_tavily`, `search_agentsweb`), plus the descriptions the model reads to decide when to use them. |
 | `database.py` | Storage. Saves memories and the conversation to `memory.db` (SQLite), turns text into embeddings, and searches them with FAISS. |
 
 One turn of the conversation goes like this:
