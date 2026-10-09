@@ -111,8 +111,12 @@ class PublicHTTPSHandler(urllib.request.HTTPSHandler):
 
 
 class CheckedRedirects(urllib.request.HTTPRedirectHandler):
-    """A redirect is a new request, so it gets the egress check too. (Its connection goes through public_socket.)"""
+    """A redirect is a new request, so it gets the egress check too. (Its connection goes through public_socket.)
+    urllib also follows redirects to ftp://, whose connections don't go through public_socket, so only http and https
+    redirects are followed."""
     def redirect_request(self, request, response, code, message, headers, new_url):
+        if urllib.parse.urlparse(new_url).scheme not in ("http", "https"):
+            raise PermissionError(f"Refused a redirect to {new_url}: only http and https can be followed.")
         check_request(new_url)
         return super().redirect_request(request, response, code, message, headers, new_url)
 
