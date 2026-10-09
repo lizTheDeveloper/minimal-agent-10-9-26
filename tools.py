@@ -7,6 +7,7 @@ import urllib.request
 import xml.etree.ElementTree as ET
 
 import html
+import http.client
 import ipaddress
 import socket
 
@@ -68,33 +69,64 @@ def search_conversation_history(query):
     return "\n".join(f"{message['role']}: {message['content']}" for message in matches)
 
 
-def check_public(url):
-    """Refuse URLs that point inside this machine or network, like localhost:5050 (the viewer), a router's admin
-    page, or a cloud metadata address. A page could ask the agent to fetch one to reach things it shouldn't."""
-    parsed = urllib.parse.urlparse(url)
-    if parsed.scheme not in ("http", "https") or not parsed.hostname:
-        raise PermissionError("Only http and https links to public sites can be fetched.")
-    for *_, address in socket.getaddrinfo(parsed.hostname.rstrip("."), parsed.port or (443 if parsed.scheme == "https" else 80)):
-        if not ipaddress.ip_address(address[0].split("%")[0]).is_global:  # private, loopback, link-local, reserved...
-            raise PermissionError(f"{parsed.hostname} is a local or private address, so it can't be fetched.")
+def public_socket(address, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, source_address=None, *args):
+    """Open every connection ourselves: resolve the host, refuse it if any address isn't public (localhost, a router's
+    admin page, a cloud metadata address...), then connect to an address we just checked. A page could ask the agent
+    to fetch a private address to reach things it shouldn't. Checking here, at the moment of connecting, rather than
+    by reading the URL first, means a DNS answer that changes after the check, or a URL that one parser reads
+    differently from another, can't slip a request through to a private address."""
+    host, port = address
+    addresses = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    for *_, (ip, *_) in addresses:
+        if not ipaddress.ip_address(ip.split("%")[0]).is_global:
+            raise PermissionError(f"{host} is a local or private address, so it can't be fetched.")
+    family, kind, protocol, _, ip_address = addresses[0]
+    connection = socket.socket(family, kind, protocol)
+    if timeout is not socket._GLOBAL_DEFAULT_TIMEOUT:
+        connection.settimeout(timeout)
+    connection.connect(ip_address)
+    return connection
+
+
+class PublicHTTPConnection(http.client.HTTPConnection):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._create_connection = public_socket
+
+
+class PublicHTTPSConnection(http.client.HTTPSConnection):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._create_connection = public_socket  # TLS still checks the certificate against the hostname
+
+
+class PublicHTTPHandler(urllib.request.HTTPHandler):
+    def http_open(self, request):
+        return self.do_open(PublicHTTPConnection, request)
+
+
+class PublicHTTPSHandler(urllib.request.HTTPSHandler):
+    def https_open(self, request):
+        return self.do_open(PublicHTTPSConnection, request, context=self._context)
 
 
 class CheckedRedirects(urllib.request.HTTPRedirectHandler):
-    """A public page can redirect to a private address, so every hop gets the same checks as the first request."""
+    """A redirect is a new request, so it gets the egress check too. (Its connection goes through public_socket.)"""
     def redirect_request(self, request, response, code, message, headers, new_url):
-        check_public(new_url)
         check_request(new_url)
         return super().redirect_request(request, response, code, message, headers, new_url)
 
 
-opener = urllib.request.build_opener(CheckedRedirects)
+# No proxies: through a proxy the connection would go to the proxy, and public_socket couldn't check the real address.
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), PublicHTTPHandler, PublicHTTPSHandler, CheckedRedirects)
 
 
 def http_get(url, data=None, headers=None):
     """Fetch a URL (POST if data is given) and return the response body as text. Every request the agent makes goes
-    through here, so this is where requests to private addresses (check_public) and requests that would leak data
+    through here, so this is where requests to private addresses (public_socket) and requests that would leak data
     (the egress check, see egress.py) are stopped."""
-    check_public(url)
+    if urllib.parse.urlparse(url).scheme not in ("http", "https"):
+        raise PermissionError("Only http and https links can be fetched.")
     check_request(url, data)
     request = urllib.request.Request(url, data=data, headers={"User-Agent": "minimal-agent", **(headers or {})})
     with opener.open(request, timeout=30) as response:
