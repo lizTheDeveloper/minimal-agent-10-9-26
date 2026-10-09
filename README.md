@@ -133,7 +133,7 @@ Prompt injection is how an attacker gets text *into* the agent. Any outgoing req
 | Rules | The real values of API keys in the environment, anything shaped like a key, long encoded blobs, and five words in a row copied from a memory. |
 | Classifier (`EGRESS_MODEL`, default `anthropic/claude-haiku-5.5`) | Private details paraphrased into a query, and data smuggled to an odd site in a URL. It's given your memories so it knows what counts as private. |
 
-If the check can't run, the request is blocked. Blocked requests are logged in the `blocked_requests` table, and the model is told to tell you about them instead of retrying. The check is deliberately strict, so it may also block a search that's about you even when you asked for it.
+Requests to local or private addresses (localhost, your router, cloud metadata) are refused too, including when a public page redirects to one. If the check can't run, the request is blocked. Blocked requests are logged in the `blocked_requests` table, and the model is told to tell you about them instead of retrying. The check is deliberately strict, so it may also block a search that's about you even when you asked for it.
 
 ### Research mode: running on its own
 

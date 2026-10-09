@@ -7,6 +7,8 @@ import urllib.request
 import xml.etree.ElementTree as ET
 
 import html
+import ipaddress
+import socket
 
 import database
 import rerank
@@ -66,12 +68,36 @@ def search_conversation_history(query):
     return "\n".join(f"{message['role']}: {message['content']}" for message in matches)
 
 
+def check_public(url):
+    """Refuse URLs that point inside this machine or network, like localhost:5050 (the viewer), a router's admin
+    page, or a cloud metadata address. A page could ask the agent to fetch one to reach things it shouldn't."""
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise PermissionError("Only http and https links to public sites can be fetched.")
+    for *_, address in socket.getaddrinfo(parsed.hostname.rstrip("."), parsed.port or (443 if parsed.scheme == "https" else 80)):
+        if not ipaddress.ip_address(address[0].split("%")[0]).is_global:  # private, loopback, link-local, reserved...
+            raise PermissionError(f"{parsed.hostname} is a local or private address, so it can't be fetched.")
+
+
+class CheckedRedirects(urllib.request.HTTPRedirectHandler):
+    """A public page can redirect to a private address, so every hop gets the same checks as the first request."""
+    def redirect_request(self, request, response, code, message, headers, new_url):
+        check_public(new_url)
+        check_request(new_url)
+        return super().redirect_request(request, response, code, message, headers, new_url)
+
+
+opener = urllib.request.build_opener(CheckedRedirects)
+
+
 def http_get(url, data=None, headers=None):
     """Fetch a URL (POST if data is given) and return the response body as text. Every request the agent makes goes
-    through here, so this is where the egress check stops one that would leak data (see egress.py)."""
+    through here, so this is where requests to private addresses (check_public) and requests that would leak data
+    (the egress check, see egress.py) are stopped."""
+    check_public(url)
     check_request(url, data)
     request = urllib.request.Request(url, data=data, headers={"User-Agent": "minimal-agent", **(headers or {})})
-    with urllib.request.urlopen(request, timeout=30) as response:
+    with opener.open(request, timeout=30) as response:
         return response.read().decode("utf-8")
 
 
