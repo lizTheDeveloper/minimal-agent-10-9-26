@@ -46,10 +46,12 @@ def rule_check(text):
                                     for blob in BASE64_BLOB.findall(text)):
         return "contains a long encoded blob; search queries and page addresses don't need one"
     outgoing = " ".join(words(text))
-    for (memory,) in memory_cursor.execute("SELECT content FROM memories"):  # five words in a row copied from a memory
+    # Eight words in a row copied from a memory. Fewer gives false alarms: memories can mention public things, like a
+    # product name, that also turn up in a news URL. Shorter or reworded leaks are the classifier's job.
+    for (memory,) in memory_cursor.execute("SELECT content FROM memories"):
         memory_words = words(memory)
-        for start in range(len(memory_words) - 4):
-            if " ".join(memory_words[start:start + 5]) in outgoing:
+        for start in range(len(memory_words) - 7):
+            if " ".join(memory_words[start:start + 8]) in outgoing:
                 return "repeats a memory about the user word for word"
     return None
 
