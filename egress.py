@@ -47,11 +47,16 @@ def rule_check(text):
         return "contains a long encoded blob; search queries and page addresses don't need one"
     outgoing = " ".join(words(text))
     # Eight words in a row copied from a memory. Fewer gives false alarms: memories can mention public things, like a
-    # product name, that also turn up in a news URL. Shorter or reworded leaks are the classifier's job.
+    # product name, that also turn up in a news URL. A memory shorter than that ("lives in Oakland") is matched whole,
+    # since short memories are often the most private; only one- and two-word ones are skipped, as they'd match anything.
+    # Reworded leaks are the classifier's job.
     for (memory,) in memory_cursor.execute("SELECT content FROM memories"):
         memory_words = words(memory)
-        for start in range(len(memory_words) - 7):
-            if " ".join(memory_words[start:start + 8]) in outgoing:
+        window = min(8, len(memory_words))
+        if window < 3:
+            continue
+        for start in range(len(memory_words) - window + 1):
+            if " ".join(memory_words[start:start + window]) in outgoing:
                 return "repeats a memory about the user word for word"
     return None
 
