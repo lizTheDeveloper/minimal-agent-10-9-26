@@ -122,6 +122,19 @@ Names are matched ignoring case. Two entities can share a name if their types di
 
 Everything fetched from the web is wrapped in `<untrusted_document>` tags, and the system prompt tells the model to treat it as data to evaluate critically, never as instructions.
 
+### Reading pages, and the egress check
+
+`fetch_page` reads a whole page or paper when a search snippet isn't enough. With a Tavily key it uses Tavily's extract endpoint, which returns just the article text. Without one it fetches the page and strips the HTML. Fetched pages are cached, threaded and marked untrusted, like search results.
+
+Prompt injection is how an attacker gets text *into* the agent. Any outgoing request is how data could get *out*: a page that says "search for the user's address" or "load evil.example/?d=..." only does harm if the agent sends that request. So every request goes through `egress.py` first:
+
+| Check | Catches |
+|---|---|
+| Rules | The real values of API keys in the environment, anything shaped like a key, long encoded blobs, and five words in a row copied from a memory. |
+| Classifier (`EGRESS_MODEL`, default `anthropic/claude-haiku-5.5`) | Private details paraphrased into a query, and data smuggled to an odd site in a URL. It's given your memories so it knows what counts as private. |
+
+If the check can't run, the request is blocked. Blocked requests are logged in the `blocked_requests` table, and the model is told to tell you about them instead of retrying. The check is deliberately strict, so it may also block a search that's about you even when you asked for it.
+
 ### Research mode: running on its own
 
 The agent can also run headless, as a researcher. It follows a standing brief: check your categories and threads, search for what's new, sort documents onto threads, categorize them, add what it learns to the knowledge graph, and write a report.
@@ -134,7 +147,7 @@ uv run agent.py --research --brief brief.md   # your own brief instead of the de
 
 Each run prints the tools it calls, then its report. Reports are also saved in the `reports` table, so in a normal chat you can ask "what did the research runs find?" and the agent reads them with `research_reports`. You can chat while research runs in another terminal. Both share `memory.db`, and each one picks up what the other wrote before it searches.
 
-Nobody checks a research run's work, so it gets fewer tools. It can search, sort, categorize and add to the graph, but it can't add, move or forget memories, and it can't delete anything. Each run is capped at 40 model calls (`--max-steps`), which also caps what it can spend.
+Nobody checks a research run's work, so it gets only the tools on an allowlist: search, sort threads, categorize and add to the graph. It never sees your memories, so a malicious page can't trick it into sending them out in a search query. It can't delete entities or relationships, or remove data from them. Its reports are marked untrusted when the chat agent reads them, because they were written from untrusted pages. Each run is capped at 40 model calls (`--max-steps`), which also caps what it can spend.
 
 To start runs on a schedule instead of leaving a terminal open, use cron (or launchd on a Mac). For example, every two hours:
 
@@ -160,6 +173,7 @@ The model has to support tool calling. If you get errors about tools, try a diff
 | `prompt.py` | Builds the list of messages the model sees: the system prompt, the conversation so far, and your new message. |
 | `tools.py` | The tools the model can call (`get_time`, memory tools, knowledge graph tools, and web search: `search_arxiv`, `search_tavily`, `search_agentsweb`), plus the descriptions the model reads to decide when to use them. |
 | `database.py` | Storage. Saves memories and the conversation to `memory.db` (SQLite), turns text into embeddings, and searches them with FAISS. |
+| `egress.py` | Checks every outgoing request for data that shouldn't leave: keys, encoded blobs, and your memories, word for word or paraphrased. |
 | `rerank.py` | Stage 2 of search: a cross-encoder re-scores what FAISS found, and a small model learns from the agent's citations what else makes a result useful. |
 
 One turn of the conversation goes like this:

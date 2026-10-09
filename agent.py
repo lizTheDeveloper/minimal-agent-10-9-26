@@ -22,7 +22,7 @@ from prompt_toolkit import PromptSession
 from prompt import RESEARCH_BRIEF, build_messages
 from database import save_conversation_history, save_report
 from rerank import learn
-from tools import AUTONOMOUS_BLOCKED, AUTONOMOUS_SCHEMAS, SCHEMAS, run_tool_call, search_memory, add_memory
+from tools import AUTONOMOUS_SCHEMAS, AUTONOMOUS_TOOLS, SCHEMAS, run_tool_call, search_memory, add_memory
 
 client = OpenAI(
     base_url="https://openrouter.ai/api/v1",  # OpenRouter speaks the OpenAI API
@@ -35,7 +35,7 @@ def respond(history, user_input, autonomous=False, max_steps=None):
     """Answer one user message, looping while the model asks for tools. An autonomous run gets fewer tools, and
     max_steps caps how many times the model is called, so a run can't loop (and spend) forever."""
     messages = build_messages(history, user_input, autonomous)  # prompt.py decides what the model sees
-    schemas, blocked = (AUTONOMOUS_SCHEMAS, AUTONOMOUS_BLOCKED) if autonomous else (SCHEMAS, ())
+    schemas, allowed = (AUTONOMOUS_SCHEMAS, AUTONOMOUS_TOOLS) if autonomous else (SCHEMAS, None)
     step = 0
     while True:
         step += 1
@@ -49,7 +49,7 @@ def respond(history, user_input, autonomous=False, max_steps=None):
         for call in reply.tool_calls:  # run each tool the model asked for
             if autonomous:
                 print(f"  {call.function.name} {call.function.arguments}", flush=True)  # a log of what the run did
-            messages.append(run_tool_call(call, blocked))  # tools.py does the work; result goes back to the model
+            messages.append(run_tool_call(call, allowed))  # tools.py does the work; result goes back to the model
 
 
 def research(brief, every=None, max_steps=40):
